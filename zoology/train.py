@@ -60,7 +60,7 @@ class Trainer:
             embed_dim = all_embeddings.shape[1]
             value_embeddings = all_embeddings[vocab_size // 2:]  # all values as candidates
             
-            outputs = self.model(inputs)
+            outputs = self.model(inputs, return_embeddings=True)
             num_kv_pairs = targets.shape[1]
             outputs = outputs[:, -num_kv_pairs:]
             
@@ -81,7 +81,7 @@ class Trainer:
         
         else: # discrete
             if self.loss_type == "ce":
-                logits = self.model(inputs)
+                logits = self.model(inputs, return_embeddings=False)
                 loss = self.loss_fn(
                     rearrange(logits, "... c -> (...) c"), 
                     targets.flatten()
