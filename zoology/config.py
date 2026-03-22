@@ -98,6 +98,7 @@ class ModelConfig(BaseConfig):
 
     d_model: int = 128
     n_layers: int = 2
+    multiplier: int = 1
     max_position_embeddings: int = 64
     learnable_word_embeddings: bool = True
     embedding_init_type: Literal["default", "spherical", "normal"] = "default"

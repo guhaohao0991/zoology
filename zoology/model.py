@@ -226,6 +226,10 @@ class LMBackbone(nn.Module):
             learnable=config.learnable_word_embeddings,
             init_type=config.embedding_init_type
         )
+
+        # Scale d_model for layers
+        config.d_model = config.d_model * config.multiplier
+
         if config.block_type == 'TransformerBlock':
             block_cls = TransformerBlock
         elif config.block_type == 'MambaBlock':
@@ -302,6 +306,7 @@ class LanguageModel(nn.Module):
                 config.vocab_size % config.pad_vocab_size_multiple
             )
 
+        assert config.multiplier == 1, "Multiplier must be 1 for discrete input model"
         self.backbone = LMBackbone(config=config)
         self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
 
@@ -328,12 +333,16 @@ class ContinuousInputModel(nn.Module):
     def __init__(self, config: ModelConfig):
         super().__init__()
         config = config.copy()
-        self.input_proj = nn.Linear(config.d_model*2, config.d_model)
+        d_original = config.d_model
+        assert config.multiplier == 2, "Multiplier must be 2 for continuous input model to be solvable."
+        assert config.learnable_word_embeddings == False, "Word embeddings must be frozen for continuous input model."
+        self.multiplier = config.multiplier
         self.backbone = LMBackbone(config)
-        self.output_proj = nn.Linear(config.d_model, config.d_model)  
+        self.output_proj = nn.Linear(self.multiplier * d_original, d_original)  
     
-    def forward(self, x):
-        return self.output_proj(self.backbone.layers_forward(self.input_proj(x)))
+    def forward(self, x, return_embeddings=True):
+        hidden = self.backbone.layers_forward(x)
+        return self.output_proj(hidden)
     
     def state_size(self, sequence_length: int):
         return _compute_state_size(self.backbone.layers, sequence_length)
