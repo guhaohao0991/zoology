@@ -5,16 +5,14 @@ _REQUIRED = [
     "numpy",
     "einops",
     "tqdm",
-    # TODO: remove this upper bound 
-    # currently, when using ray we get:
-    # "AttributeError: module 'pydantic._internal' has no attribute '_model_construction'"
     "click",
     "pydantic",
     "wandb",
     "flash-linear-attention",
     "rotary-embedding-torch",
     "causal_conv1d",
-    "einx"
+    "einx",
+    "transformers",
 ]
 
 _OPTIONAL = {
@@ -36,17 +34,11 @@ try:
 except ModuleNotFoundError:
     raise ValueError("Please install torch first: https://pytorch.org/get-started/locally/")
 
-try:
-    import transformers
-except ModuleNotFoundError:
-    raise ValueError("Please install transformers first: https://huggingface.co/transformers/installation.html")
-
 setup(
-    name="zoology",
+    name="zoology", 
     version="0.0.1",
     description="",
-    author="simran sabri",
-    packages=["zoology"],
+    packages=["zoology"],  
     install_requires=_REQUIRED,
     extras_require=_OPTIONAL,
     entry_points={
