@@ -30,6 +30,7 @@ class Trainer:
         max_epochs: int = 100,
         learning_rate: float = 1e-3,
         weight_decay: float = 0.1,
+        grad_norm_clip: float = 0.5,
         early_stopping_metric: str = None,
         early_stopping_threshold: float = None,
         loss_type: str = "ce",
@@ -49,6 +50,7 @@ class Trainer:
         self.early_stopping_threshold = early_stopping_threshold
         self.learning_rate = learning_rate
         self.weight_decay = weight_decay
+        self.grad_norm_clip = grad_norm_clip
         self.slice_keys = slice_keys
         self.loss_type = loss_type
 
@@ -139,6 +141,7 @@ class Trainer:
                     loss = loss + sum(auxiliary_loss)
 
             loss.backward()
+            nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.grad_norm_clip)
             self.optimizer.step()
             iterator.set_postfix({"loss": loss.item()})
             self.logger.log({"train/loss": loss.item(), "epoch": epoch_idx})

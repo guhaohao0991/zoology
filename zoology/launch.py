@@ -50,7 +50,11 @@ def main(python_file, outdir, name: str, parallelize: bool, gpus: str):
         import ray
         # ray was killing workers due to OOM, but it didn't seem to be necessary 
         os.environ["RAY_memory_monitor_refresh_ms"] = "0"
+        # Propagate WANDB_API_KEY to Ray workers
+        wandb_key = os.environ.get("WANDB_API_KEY", "")
         ray.init(ignore_reinit_error=True, log_to_driver=False)
+        if wandb_key:
+            os.environ["WANDB_API_KEY"] = wandb_key
 
     name = name + datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
     print(f"Running sweep {name} with {len(configs)} configs")
