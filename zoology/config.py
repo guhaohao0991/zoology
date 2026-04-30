@@ -138,6 +138,9 @@ class TrainConfig(BaseConfig):
     weight_decay: float = 0.1
     seed: int = 123
 
+    collect_predictions: bool = False
+    predictions_path: str = None
+
     launch_id: str = None
     sweep_id: str = None
     run_id: str = "default"

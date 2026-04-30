@@ -1,6 +1,7 @@
 import argparse
 import random
 from datetime import datetime
+from pathlib import Path
 from typing import List, Union
 import pandas as pd
 
@@ -209,6 +210,24 @@ class Trainer:
 
             self.scheduler.step()
 
+    def collect_predictions(self):
+        """Run inference on test set and return a DataFrame of predictions."""
+        self.model.eval()
+        results = []
+        with torch.no_grad():
+            for inputs, targets, slices in self.test_dataloader:
+                inputs, targets = inputs.to(self.device), targets.to(self.device)
+                _, preds = self.compute_loss(inputs, targets)
+                for pred, target, slc in zip(preds.cpu(), targets.cpu(), slices):
+                    mask = target != -100
+                    results.append({
+                        "preds": pred[mask].tolist(),
+                        "targets": target[mask].tolist(),
+                        "accuracy": (pred == target)[mask].to(float).mean().item(),
+                        **slc,
+                    })
+        return pd.DataFrame(results)
+
 
 def compute_metrics(
     preds: torch.Tensor, 
@@ -229,7 +248,7 @@ def compute_metrics(
 
 def train(config: TrainConfig):
     set_determinism(config.seed)
-    
+
     logger = WandbLogger(config)
     logger.log_config(config)
     config.print()
@@ -262,6 +281,15 @@ def train(config: TrainConfig):
         logger=logger,
     )
     task.fit()
+
+    # Save predictions locally if configured
+    if config.collect_predictions and config.predictions_path:
+        predictions_df = task.collect_predictions()
+        path = Path(config.predictions_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        predictions_df.to_csv(str(path) + ".csv", index=False)
+        print(f"Predictions saved to {path}.csv ({len(predictions_df)} samples)")
+
     logger.finish()
 
 
