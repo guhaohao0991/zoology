@@ -195,9 +195,15 @@ class FgGdnAttention(nn.Module):
     ) -> torch.Tensor:
         _, q_len, _ = hidden_states.shape
 
-        # Same auto-switch as the HF original: short sequences prefer
-        # fused_recurrent; in training chunk is enforced.
-        mode = "fused_recurrent" if q_len <= 64 else self.mode
+        # Mode selection. Original HF version had
+        #   mode = "fused_recurrent" if q_len <= 64 else self.mode
+        # unconditionally, which conflicts with the training-only `chunk` assert
+        # when MQAR uses short input_seq_len=64 training batches. Gate the
+        # auto-switch on eval only — in training, always honour self.mode.
+        if self.training:
+            mode = self.mode
+        else:
+            mode = "fused_recurrent" if q_len <= 64 else self.mode
         if self.training:
             assert mode == "chunk", "Only chunk mode is supported in training."
 
