@@ -61,7 +61,7 @@ conv_mixer = dict(
 from zoology.experiments.models_repo import (
     add_attention, add_sliding_window, add_based, add_mamba2, add_rwkv7,
     add_delta_net, add_gla, add_gated_delta_net, add_deepseek_nsa, add_ttt,
-    add_kda
+    add_kda, add_fg_gdn
 )
 
 models = add_attention(models, conv_mixer, input_seq_len, model_factory_kwargs)
@@ -75,6 +75,7 @@ models = add_gated_delta_net(models, conv_mixer, input_seq_len, model_factory_kw
 models = add_deepseek_nsa(models, conv_mixer, input_seq_len, model_factory_kwargs)
 models = add_ttt(models, conv_mixer, input_seq_len, model_factory_kwargs)
 models = add_kda(models, conv_mixer, input_seq_len, model_factory_kwargs)
+models = add_fg_gdn(models, conv_mixer, input_seq_len, model_factory_kwargs)
 
 # convenience for filtering out
 included = [
@@ -87,6 +88,9 @@ included = [
     # "deepseek_nsa",
     # "ttt_linear", "ttt_mlp"
     "kda",
+    "fg_gdn",
+    "fg_gdn_plus",
+    "fg_gdn_efla",
     ]
 models = [m for m in models if m.name in included]
 

@@ -320,6 +320,43 @@ def add_kda(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=
     return models
 
 
+# FG-GDN / KDA variants (fg_gdn, fg_gdn_plus, fg_gdn_efla)
+def add_fg_gdn(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2, d_models=None):
+    block_type = "TransformerBlock"
+    variants = [
+        ("fg_gdn",      {"use_fg_gdn": True,  "use_fg_gdn_plus": False, "use_efla": False}),
+        ("fg_gdn_plus", {"use_fg_gdn": False, "use_fg_gdn_plus": True,  "use_efla": False}),
+        ("fg_gdn_efla", {"use_fg_gdn": False, "use_fg_gdn_plus": False, "use_efla": True }),
+    ]
+    for d_model in (d_models or DEFAULT_D_MODELS):
+        for variant_name, flags in variants:
+            fg_gdn_mixer = dict(
+                name="zoology.mixers.fg_gdn.FgGdnAttention",
+                kwargs={
+                    "num_heads": 2,
+                    "use_short_conv": True,
+                    "conv_size": 4,
+                    **flags,
+                }
+            )
+            mixers = [conv_mixer, fg_gdn_mixer] if conv_mixer is not None else [fg_gdn_mixer]
+            mixer = ModuleConfig(
+                name="zoology.mixers.hybrid.Hybrid",
+                kwargs={"configs": mixers}
+            )
+            model = ModelConfig(
+                block_type=block_type,
+                d_model=d_model,
+                n_layers=num_layers,
+                sequence_mixer=mixer,
+                max_position_embeddings=0,
+                name=variant_name,
+                **model_factory_kwargs
+            )
+            models.append(model)
+    return models
+
+
 # Gated linear attention
 def add_gla(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2, d_models=None):
     block_type = "TransformerBlock"
