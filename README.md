@@ -1,230 +1,291 @@
-<div align="center" >
-    <img src="assets/banner.png" height=150 alt="Meerkat logo" style="margin-bottom:px"/> 
+# Zoology — 新 Seq Mixer 架构测试与可视化套件
 
-[![GitHub](https://img.shields.io/github/license/HazyResearch/meerkat)](https://img.shields.io/github/license/HazyResearch/meerkat)
-[![pre-commit](https://img.shields.io/badge/pre--commit-enabled-brightgreen?logo=pre-commit&logoColor=white)](https://github.com/pre-commit/pre-commit)
+面向 Zoology MQAR 基准，提供一套**增量、可重复**的工作流：新增一个 sequence mixer 架构 → 在三组互补的 MQAR 任务上对比多种基线 → 跨 sweep 合并结果 → 出图 + 结构化摘要。
 
-**Understand and test language model architectures on synthetic tasks.**
+所有约定沉淀在 `zoology/experiments/mqar_kda/` 下，三条核心流水线：
 
+| 任务 | 数据源 | 考察能力 | config |
+|---|---|---|---|
+| **MQAR** | `zoology.data.multiquery_ar.MQARConfig` | 基础 in-context recall（2^n kv pairs） | `mqar_configs_random_false.py` |
+| **Composition** | `zoology.data.compositional_mqar.CompositionalMQARConfig` | 多键组合（完全平方数 kv pairs） | `composition_configs_random_false.py` |
+| **Forgetting** | `zoology.data.forgetting_mqar.ForgettingMQARConfig` | 键覆盖/遗忘能力 | `forgetting_configs.py` |
 
-</div>
-
-Zoology provides machine learning researchers with a simple playground for understanding and testing language model architectures on synthetic tasks. This repository can be used to reproduce the results in our paper *[Zoology: Measuring and Improving Recall in Efficient Language Models](https://arxiv.org/abs/2312.04927)*. See the section on [reproducing paper experiments](#reproducing-paper-experiments) for details.
+每组实验在相同 8 架构、3 个 d_model、4 个学习率下扫，共 120 runs。可只开新架构做消融。
 
 ---
 
-*Why did we make Zoology?* In our research on efficient language models, synthetic tasks have been crucial for understanding and debugging issues before scaling up to expensive pretraining runs. So, we're releasing the code we've used alongside instructions for replicating a lot of our experiments and their WandB logs.  Simplicity is our main design goal: limited dependencies, architecture implementations that are easy to understand, and a straightforward process for adding new synthetic tasks. 
+## 1. Mixer 契约
 
-*Is Zoology a good fit for your use case?* If you are looking to actually train a large machine learning model, Zoology's training harness (which is optimized for simplicity) is certainly not a good fit. For our language model research, we've found the [GPT-NeoX](https://github.com/EleutherAI/gpt-neox) useful for this. That being said, you might still want to use some of Zoology's layer implementations or maybe even mix the synthetic tasks into your training distribution. 
+新 mixer 放在 `zoology/mixers/<new_arch>.py`，必须满足：
 
-*I want to explore the Based architecture. How should I get started?* See our repository at [HazyResearch/based](https://github.com/HazyResearch/based) for the code we used to train and evaluate large Based language models. If you would like to reproduce the synthetic experiments from the Based paper, this is the right repository! See [zoology/experiments/arxiv24_based_figure2/README.md]() for instructions on how to reproduce the results. 
+- `__init__(d_model, layer_idx=None, **kwargs)` —— 不吃 HF config 对象
+- `forward(hidden_states, **kwargs) -> torch.Tensor` —— 返回 bare tensor（不是 tuple）
+- 可选 `state_size(**kwargs) -> int`（用于内存报告）
 
-**Important: If using the Zoology RWKV-7 file from between March 25th-June 5, please note that the state size computation needs to be updated**
+**参考模板**：
 
-## Models
+- `zoology/mixers/kda.py` —— 纯 KDA，最小完整实现
+- `zoology/mixers/fg_gdn.py` —— 多分支（fg_gdn / fg_gdn_plus / fg_gdn_efla / use_xsa_kda）示例，演示如何在同一个类里承载多个变体
 
-We have provided support for various efficient models. 
+注意：若需要像 `inv_dt` 这样的 HF 风格重参数化，显式在 `__init__` 末尾对**该 Parameter 本身**重算即可；不要用 `self.apply(_init_weights)` 全局重初始化 `nn.Linear`，那会覆盖 zoology 的默认 init。
 
-| Year | Venue   | Model          | Title   |  Paper   |   
-| :--- | :------ | :------------- | :-------------------------------------------------------------------------------------------------------- | :------------------------------------------------: | 
-| Oct 2021  | NeurIPS    | Scatterbrain   | Scatterbrain: Unifying Sparse and Low-rank Attention Approximation           |  [link](https://arxiv.org/abs/2110.15343)    |
-| Jan 2023  | ICLR       | H3             | Hungry Hungry Hippos: Towards Language Modeling with State Space Models      |  [link](https://arxiv.org/abs/2212.14052)    |
-| Feb 2023  | ICLR       | Hyena          | Hyena Hierarchy: Towards Larger Convolutional Language Models                |  [link](https://arxiv.org/abs/2302.10866)    |
-| July 2023  | ICLR       | RetNet         | Retentive Network: A Successor to Transformer for Large Language Models                |  [link](https://arxiv.org/abs/2307.08621)    |
-| Dec 2023  | ICLR       | Input-dependent sparse attention          | Zoology: Measuring and Improving Recall in Efficient Language Models         |      [link](https://arxiv.org/abs/2312.04927)         |
-| Dec 2023  | COLM       | Mamba          | Mamba: Linear-Time Sequence Modeling with Selective State Spaces             |  [link](https://arxiv.org/abs/2312.00752)         |
-| Dec 2023  | ICML       | GLA            | Gated Linear Attention Transformers with Hardware-Efficient Training         |  [link](https://arxiv.org/abs/2312.06635)    |
-| Dec 2023  | ICML       | Based          | Simple linear attention language models balance the recall-throughput tradeoff   |      [link](https://arxiv.org/abs/2402.18668)         |
-| June 2024 | ICML       | Mamba2         | Transformers are SSMs: Generalized Models and Efficient Algorithms Through Structured State Space Duality |      [link](https://arxiv.org/abs/2405.21060)       |
-| June 2024 | NeurIPS    | DeltaNet       | Parallelizing Linear Transformers with Delta Rule  over Sequence Length      |      [link](https://arxiv.org/abs/2406.06484)   |
-| Dec 2024  | ICLR       | Gated DeltaNet | Gated Delta Networks: Improving Mamba2 with Delta Rule                       |      [link](https://arxiv.org/abs/2412.06464)   |
-| Feb 2025  | ArXiv      | DeepSeek Native sparse attention   | Native Sparse Attention: Hardware-Aligned and Natively Trainable Sparse Attention | [link](https://arxiv.org/pdf/2502.11089)   | 
-| Mar 2025  | ArXiv      |  RWKV7         |    RWKV-7 "Goose" with Expressive Dynamic State Evolution                    |      [link](https://arxiv.org/abs/2503.14456)    | 
+---
 
-<div align="center" >
-    <img src="zoology/analysis/paper/zoology_paper/zoology_results.png" height=300 alt="MQAR Plot" style="margin-bottom:px"/>
-</div> 
+## 2. 三步接入新架构
 
-**Notes:** 
-1. State size is a *proxy* for model efficiency, however it is also worth considering the wall-clock speed required to use different state sizes for a particular architecture choice. 
-2. We give the *BASED* recipe to these architectures, where we hybridize the sequence mixer with a short convolution, for fair comparison. Pre-BASED linear attention architectures like RetNet, GLA typically did not use short convolutions/short local mixers.
-3. MQAR is a useful but simplistic synthetic. We wholeheartedly welcome contributions for new synthetics (MQAR variants) that test additional skills -- feel free to make a PR or email us!
+### Step 1 · 实现 mixer
 
-## Getting started
-
-**Installation.** First, ensure you have torch and transformers installed. You can install torch using the following the instructions [here](https://pytorch.org/get-started/locally/). Then, install Zoology with:
- 
-```bash
-git clone https://github.com/HazyResearch/zoology.git
-cd zoology
-pip install -e .[extra,analysis] 
-```
-If you want to keep this install as lightweight as possible; the only required dependencies are: `torch, einops, tqdm, pydantic, wandb`. The ``mamba_ssm, conv1d`` installs are often problematic. There is some extra functionality (*e.g.* launching sweeps in parallel with Ray) that require additional dependencies. To install without the optional dependencies, run `pip install -e .`.
-
-Observations: 
-- The ```fla``` module (imported for GLA, RWKV-v7, etc.) is most compatible with Python 3.10+ Further, if you use an H100 GPU and incur issues with triton, you may find this issue helpful: [issue](https://github.com/fla-org/flash-linear-attention/issues/196).
-- The ```mamba_ssm``` module (imported for Mamba) is most compatible with PyTorch 2.5
-
-Then, try running an example experiment with: 
-```bash
-python -m zoology.launch zoology/experiments/basic_examples/basic.py
-```
-This will train a simple two layer transformer on multi-query associative recall. To run a sweep over learning rates, try: 
-```bash
-python -m zoology.launch zoology/experiments/basic_examples/basic_sweep.py
-```
-For a more complete sweep of models, similar to the above Recall-Memory Tradeoff figure, you can use:
-```bash
-python -m zoology.launch zoology/experiments/mqar_example_configs/original_mqar_configs.py -p 
-```
-If you have access to multiple GPUs, you can run the sweep in parallel by adding the `-p` flag.
-
-
-## Reproducing paper experiments
-This repository has been used to produce results in a few papers on efficient language models. 
-The configs, instructions and plotting code for reproducing the figures in these papers are provided in the following sub-folders. 
-
-- [Zoology: Measuring and improving recall in efficient language models](https://arxiv.org/abs/2312.04927)
-    - ./zoology/experiments/paper_configs/iclr24_zoology_figure2
-- [Based: Simple linear attention balances the recall-throughput tradeoff]()
-    - ./zoology/experiments/paper_configs/arxiv24_based_figure2
-    - ./zoology/experiments/paper_configs/arxiv24_based_figure3
-
-## Configuration, Experiments, and Sweeps
-In this section, we'll walk through how to configure an experiment and launch sweeps. 
-
-*Configuration*. Models, data, and training are controlled by configuration objects. For details on available configuration fields, see the configuration definition in [`zoology/config.py`](zoology/config.py). The configuration is a nested Pydantic model, which can be instantiated as follows:
 ```python
-from zoology.config import TrainConfig, ModelConfig, DataConfig, ModuleConfig, FunctionConfig
-from zoology.data.associative_recall import MQARConfig
+# zoology/mixers/my_mixer.py
+import torch
+import torch.nn as nn
 
-input_seq_len = 10
+class MyMixer(nn.Module):
+    def __init__(self, d_model, layer_idx=None, num_heads=2, **kwargs):
+        super().__init__()
+        ...
+    def forward(self, hidden_states, **kwargs):
+        ...
+        return out  # bare tensor
+    def state_size(self, sequence_length=2048):
+        return ...  # optional
+```
 
-config = TrainConfig(
-    max_epochs=20,
-    data=DataConfig(
-        train_configs=[MQARConfig(num_examples=10_000, vocab_size=128, input_seq_len=input_seq_len, )], #**factory_kwargs
-        test_configs=[MQARConfig(num_examples=1_000, vocab_size=128, input_seq_len=input_seq_len, )], #**factory_kwargs
-    ),
-    model=ModelConfig(
-        vocab_size=128,
-        sequence_mixer=ModuleConfig(name= "zoology.mixers.attention.MHA") ),
+**SomkeTest**（前/反向都跑一下，涵盖 `q_len=64` 训练路径——MQAR 的第一个 batch 就是 64）：
+
+```bash
+cd /root/paddlejob/workspace/env_run/output/haohao/zoology
+conda run -n py310_ljl python -c "
+import torch
+from zoology.mixers.my_mixer import MyMixer
+
+layer = MyMixer(d_model=128, num_heads=2).cuda().bfloat16()
+layer.train()
+x = torch.randn(2, 64, 128, device='cuda', dtype=torch.bfloat16, requires_grad=True)
+y = layer(x)
+y.float().pow(2).mean().backward()
+assert not torch.isnan(y).any()
+print('ok', tuple(y.shape))
+"
+```
+
+### Step 2 · 注册工厂函数
+
+在 `zoology/experiments/models_repo.py` 文末加：
+
+```python
+def add_my_mixer(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2, d_models=None):
+    block_type = "TransformerBlock"
+    for d_model in (d_models or DEFAULT_D_MODELS):
+        my_mixer = dict(
+            name="zoology.mixers.my_mixer.MyMixer",
+            kwargs={"num_heads": 2, ...},
+        )
+        mixers = [conv_mixer, my_mixer] if conv_mixer is not None else [my_mixer]
+        mixer = ModuleConfig(name="zoology.mixers.hybrid.Hybrid", kwargs={"configs": mixers})
+        model = ModelConfig(
+            block_type=block_type,
+            d_model=d_model,
+            n_layers=num_layers,
+            sequence_mixer=mixer,
+            max_position_embeddings=0,
+            name="my_mixer",                # 架构名，后面在 included 里引用
+            **model_factory_kwargs,
+        )
+        models.append(model)
+    return models
+```
+
+**多变体写法**参考 `add_fg_gdn`（循环三组 flags，每组赋不同 `name`）。
+
+### Step 3 · 接入三组实验 config
+
+对 `zoology/experiments/mqar_kda/{mqar,composition,forgetting}_configs*.py` 做两处同步修改：
+
+```python
+from zoology.experiments.models_repo import (
+    ..., add_my_mixer      # ← 导入
 )
-```
-Note that the `FunctionConfig` and `ModuleConfig` are special objects that configure partial functions and PyTorch modules, respectively. 
-They both have an `instantiate()` method that will import the function or class passed to `name` and partial or instantiate it with `kwargs`.
-For example, 
-```python
-fn_config = FunctionConfig(name="torch.sort", kwargs={"descending": True})
-fn = fn_config.instantiate()
-fn(torch.tensor([2,4,3])) # [4, 3, 2]
-```
 
-*Launching experiments.* To launch an experiment from the command line, define a configuration object in python file and store it in a global variable `configs`:
-```python
-config = TrainConfig(...)
-configs = [config]
-```
-See [`zoology/experiments/examples/basic.py`](zoology/experiments/basic_examples/basic.py) for an example. 
+models = ...
+models = add_my_mixer(models, conv_mixer, input_seq_len, model_factory_kwargs)  # ← 调用
 
-Then run `python -m zoology.launch zoology/experiments/examples/basic.py`, replacing `basic.py` with the path to your experiment. This will launch a single training job. 
-
-
-*Launching sweeps.* To launch a sweep, simply add more configuration objects to the `configs` list. For example, here's the content of [`zoology/experiments/examples/basic_sweep.py`](zoology/experiments/basic_examples/basic_sweep.py):
-```python
-import numpy as np
-from zoology.config import TrainConfig
-
-configs = []
-for lr in np.logspace(-4, -2, 10):
-   configs.append(TrainConfig(learning_rate=lr)) 
-```
-You can then run `python -m zoology.launch zoology/experiments/examples/basic_sweep.py`. This will launch a sweep with 10 jobs, one for each configuration.
-
-*Launching sweeps in parallel.* If you have multiple GPUs on your machine, you can launch sweeps in parallel across your devices. 
-To launch sweeps in parallel, you'll need to install [Ray](https://docs.ray.io/en/latest/ray-overview/installation.html): `pip install -e.[extras]`. 
-Then, you can run `python -m zoology.launch zoology/experiments/basic_sweep.py -p`. 
-This will run the configurations in parallel using a pool of workers, one per GPU.
-
-*Logging.* Zoology uses [Weights and Biases](https://wandb.ai/site) for logging. You'll need to login with `wandb login` and update the `LoggerConfig` in your configuration to point to your project: 
-```python
-from zoology.config import TrainConfig, LoggerConfig
-
-TrainConfig(
-    logger=LoggerConfig(
-        project="my_wandb_project",
-        entity="my_wandb_entity",
-    ),
-    ...
-)
+included = [
+    ...,
+    "my_mixer",            # ← 加入筛选名单
+]
 ```
 
-## Data
-In this section, we'll walk through how to create a new synthetic task and discuss some of the tasks that are already implemented.
+若只想单独跑新架构做消融，把 `included` 里其它基线名注释掉即可（当前 `fg_gdn` 三变体就是这么做的）。
 
-*Creating a new task.* To create a new task, you'll need to subclass `zoology.config.DataSegmentConfig`. 
-See zoology/data/associative_recall.py  for an example. 
-```python
-class DataSegmentConfig(BaseConfig):
-    """
-    This class should be subclassed to define per task. For example, MQARConfig
-    """
-    vocab_size: int = 8_192
-    num_examples: int = 1_000
-    input_seq_len: int = 64
+---
 
-    def build(self, **kwargs):
-        raise NotImplementedError()
+## 3. 运行实验
+
+三组实验互相独立，按需跑：
+
+```bash
+cd /root/paddlejob/workspace/env_run/output/haohao/zoology
+
+export WANDB_API_KEY=<your_key>
+export https_proxy=<your_proxy>
+
+# ─── 基础 MQAR ─────────────────────────────────────────
+conda run -n <conda_env> python -m zoology.launch \
+    zoology/experiments/mqar_kda/mqar_configs_random_false.py \
+    -p --gpus 0,1,2,3,4,5,6,7
+
+# ─── 组合 MQAR ─────────────────────────────────────────
+conda run -n <conda_env> python -m zoology.launch \
+    zoology/experiments/mqar_kda/composition_configs_random_false.py \
+    -p --gpus 0,1,2,3,4,5,6,7
+
+# ─── Forgetting MQAR ──────────────────────────────────
+conda run -n <conda_env> python -m zoology.launch \
+    zoology/experiments/mqar_kda/forgetting_configs.py \
+    -p --gpus 0,1,2,3,4,5,6,7
 ```
 
-You'll need to implement the `build` method, which should return a `zoology.data.utils.DataSegment` object, a simple dataclass:
+**参数说明**：
 
-```python
-@dataclass
-class DataSegment:
-    inputs: torch.Tensor
-    labels: torch.Tensor
-    slices: Dict[str, any] = None
+- `--gpus` 是 `CUDA_VISIBLE_DEVICES` 的值（逗号分隔 GPU id，每张 GPU 同时只跑 1 个 run）
+- `-p` 启用 Ray 并行
+- 启动时 log 头会打印 `sweep_id='<sweep_name>'`，**复制这个完整字符串**，下一步注册要用
+
+120 runs × 3 任务，8 GPU 并行，典型墙钟 1–2 h。
+
+---
+
+## 4. 增量注册 + 可视化
+
+分析脚本 `zoology/experiments/mqar_kda/analyze_results.py` 内置三件套：
+**sweep 注册表**（单一真值源）+ **per-sweep 缓存**（只拉一次 wandb）+ **跨 sweep 合并视图**（按 `run_id` 去重）。
+
+### 核心操作：每跑完一个新架构实验，一条命令入库
+
+```bash
+conda run -n py310_ljl python zoology/experiments/mqar_kda/analyze_results.py \
+    --register MQAR        <mqar_sweep_id> \
+    --register Composition <composition_sweep_id> \
+    --register Forgetting  <forgetting_sweep_id>
 ```
-The inputs and labels should be integer tensors with values in the range `[0, vocab_size)`. 
 
+执行流程：
 
-You can create this subclass in any file you want, as long as it's importable. Let's
-assume that we've created a file `zoology/data/my_task.py` and written our `MyDataSegmentConfig` function there.
-Then, we can add it to our data configuration with: 
-```python
-from zoology.config import TrainConfig, DataConfig, FunctionConfig
-config = TrainConfig(
-    DataConfig(
-        train_configs=[MyDataSegmentConfig(num_examples=10_000, vocab_size=128, input_seq_len=input_seq_len, **other_kwargs)],
-        test_configs=[MyDataSegmentConfig(num_examples=1_000, vocab_size=128, input_seq_len=input_seq_len, **other_kwargs)],
-    ),
-)
+1. 把新 sweep_id 追加到 `results/sweep_registry.json`（去重）
+2. 仅对新 sweep 访问 wandb，其它 sweep 复用本地缓存 `results/data/cache/<sweep_id>.csv`
+3. 按 task concat 所有历史 sweep → 去重 → 写 `results/data/<task>_runs.csv`
+4. 重画四张图 + 刷新 `summary.json`
+
+### 其它常用命令
+
+```bash
+# 查看当前注册表 + 缓存状态
+python .../analyze_results.py --list
+
+# 只用本地缓存重画（不访问 wandb）
+python .../analyze_results.py --offline
+
+# 强制重拉某个 sweep（删除缓存）
+python .../analyze_results.py --refetch <sweep_id>
+
+# 只分析任务子集
+python .../analyze_results.py --tasks MQAR Composition
 ```
 
+### 手动编辑注册表
 
-**Caching dataset creation.** Sometimes it's useful to cache the dataset creation process, especially if it's expensive. To do so you can pass a `cache_dir` to the `DataConfig`: `DataConfig(..., cache_dir="my_cache_dir")`.
+直接改 `results/sweep_registry.json`（JSON 结构：`{task: [sweep_id, ...]}`），适合批量增删或回滚。
 
+---
 
-## Plotting and analysis
+## 5. 输出物
 
-See the example plotting code in  ```zoology/analysis/mqar_plotting_example.py``` for how we produced a graph like the one at the top of this README, using the wandb logged outputs of experiment sweeps. 
+每次 `analyze_results.py` 运行后，结果结构如下：
 
-
-
-## About 
-
-This repo is being developed by members of the HazyResearch group. 
-
-If you use this codebase, or otherwise found our work valuable, please cite:
 ```
-@article{zoology2023,
-  title={Zoology: Measuring and Improving Recall in Efficient Language Models},
-  author={Arora, Simran and Eyuboglu, Sabri and Timalsina, Aman and Johnson, Isys and Poli, Michael and Zou, James and Rudra, Atri and Ré, Christopher},
-  journal={	arXiv:2312.04927},
-  year={2023}
+results/
+├── sweep_registry.json          # 所有已注册 sweep 的单一真值源
+├── data/
+│   ├── cache/
+│   │   ├── <sweep_id_1>.csv     # 单个 sweep 的 wandb 原始拉取（只拉一次）
+│   │   └── <sweep_id_2>.csv
+│   ├── mqar_runs.csv            # MQAR 任务合并视图（所有已注册 sweep 的并集）
+│   ├── composition_runs.csv
+│   ├── forgetting_runs.csv
+│   └── eval_matrix.csv          # 长表：Model × d_model × Task × num_kv_pairs × accuracy
+├── figures/
+│   ├── difficulty_curves.png    # 图A：accuracy vs num_kv_pairs，facet=task，hue=model
+│   ├── heatmap.png              # 图B：model × num_kv_pairs 热力图，facet=d_model×task
+│   ├── radar.png                # 图C：各模型在最难分片的能力雷达图
+│   └── fact_capacity.png        # 图D：acc≥99% 下可解的最大 kv 数 vs d_model
+└── summary.json                 # 结构化摘要：arch → d_model → task → {max_kv_solved_99, accuracy_by_kv}
+```
+
+**`summary.json` 结构**（便于下游程序消费）：
+
+```json
+{
+  "meta": {"tasks": ["MQAR", "Composition", "Forgetting"], "threshold": 0.99},
+  "models": {
+    "fg_gdn": {
+      "128": {
+        "MQAR":        {"max_kv_solved_99": 64, "accuracy_by_kv": {"4": 1.0, "8": 1.0, ...}},
+        "Composition": {...},
+        "Forgetting":  {...}
+      },
+      "64":  {...},
+      "32":  {...}
+    },
+    "kda": {...}
+  }
 }
 ```
 
+---
 
+## 6. 典型工作流示例（添加 my_mixer 并对比 kda 基线）
 
+```bash
+# 1) 实现 + 冒烟
+vim zoology/mixers/my_mixer.py
+conda run -n py310_ljl python -c "from zoology.mixers.my_mixer import MyMixer; ..."
+
+# 2) 注册工厂 + 接入 config
+vim zoology/experiments/models_repo.py           # 加 add_my_mixer
+vim zoology/experiments/mqar_kda/mqar_configs_random_false.py          # import + call + included
+vim zoology/experiments/mqar_kda/composition_configs_random_false.py   # 同上
+vim zoology/experiments/mqar_kda/forgetting_configs.py                 # 同上
+
+# 3) 启动 3 个实验（留意 log 里的 sweep_id）
+conda run -n py310_ljl python -m zoology.launch zoology/experiments/mqar_kda/mqar_configs_random_false.py -p --gpus 0,1,2,3,4,5,6,7
+conda run -n py310_ljl python -m zoology.launch zoology/experiments/mqar_kda/composition_configs_random_false.py -p --gpus 0,1,2,3,4,5,6,7
+conda run -n py310_ljl python -m zoology.launch zoology/experiments/mqar_kda/forgetting_configs.py -p --gpus 0,1,2,3,4,5,6,7
+
+# 4) 增量入库 + 出图
+conda run -n py310_ljl python zoology/experiments/mqar_kda/analyze_results.py \
+    --register MQAR <mqar_sweep_id> \
+    --register Composition <composition_sweep_id> \
+    --register Forgetting <forgetting_sweep_id>
+
+# 5) 查看
+open zoology/experiments/mqar_kda/results/figures/heatmap.png
+cat zoology/experiments/mqar_kda/results/summary.json
+```
+
+---
+
+## 7. 已接入的架构清单
+
+注册工厂: `attention, based, mamba2, delta_net, rwkv7, gla, gated_delta_net, deepseek_nsa, ttt(linear/mlp), kda, fg_gdn(+plus/+efla)`
+
+当前默认 `included` 基线对比组: `attention, based, gla, gated_delta_net, kda` + `fg_gdn` 三变体。取消 `included` 注释即可加回其它基线。
+
+---
+
+## 8. 常见坑
+
+- **Python 环境**：所有 python 命令必须在 `conda run -n py310_ljl` 下，否则 triton / fla 版本不对
+- **训练期 mode assert**：若 mixer 里有类似 `if self.training: assert mode == "chunk"` 的检查，auto-switch `if q_len <= 64: mode = "fused_recurrent"` 必须排除训练路径，否则 MQAR 第一个 seq_len=64 的 batch 就会炸（`fg_gdn.py` 已修复，参考其写法）
+- **wandb 拉取失败**：需要 `WANDB_API_KEY` + `https_proxy` 环境变量
+- **多变体架构**：不要在多个 ModelConfig 里共用同一个 `name`，否则 `best_per_model` 会把它们 groupby 到一起；用不同 `name` 作区分（如 fg_gdn / fg_gdn_plus / fg_gdn_efla）

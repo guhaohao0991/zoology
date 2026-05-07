@@ -3,15 +3,31 @@
 fla_fixhead 三组实验统一分析脚本：MQAR / Composition / Forgetting
 
 用法:
-  # 从 wandb 拉取 + 出图（首次）
-  conda run -n py310_ljl python zoology/experiments/fla_fixhead/analyze_results.py
+  # 首次使用（从 TASKS 里硬编码的 sweep_id 引导注册表 + 拉 wandb + 出图）
+  conda run -n py310_ljl python zoology/experiments/mqar_kda/analyze_results.py
 
-  # 仅用本地 CSV 重新出图（离线）
-  conda run -n py310_ljl python zoology/experiments/fla_fixhead/analyze_results.py --offline
+  # 跑完一个新架构实验后，增量注册该 sweep 并自动合并 + 重画所有图
+  conda run -n py310_ljl python zoology/experiments/mqar_kda/analyze_results.py \\
+      --register MQAR <new_sweep_id>
 
-输出:
-  results/data/*.csv        原始数据备份
-  results/figures/*.png     图表
+  # 同时注册到多个任务（例如同一架构同时跑了 MQAR 和 Composition）
+  conda run -n py310_ljl python zoology/experiments/mqar_kda/analyze_results.py \\
+      --register MQAR <sweep_A> --register Composition <sweep_B>
+
+  # 仅用本地 CSV 重新出图（不访问 wandb）
+  conda run -n py310_ljl python zoology/experiments/mqar_kda/analyze_results.py --offline
+
+  # 强制刷新某个 sweep 的缓存（删除本地 cache 再重拉）
+  conda run -n py310_ljl python zoology/experiments/mqar_kda/analyze_results.py \\
+      --refetch <sweep_id>
+
+数据与注册表:
+  results/sweep_registry.json   所有已注册的 sweep_id（每个 task 一个列表）
+  results/data/cache/*.csv      每个 sweep 的原始拉取缓存（只拉一次）
+  results/data/*_runs.csv       每个 task 的合并 CSV（所有已注册 sweep 的并集，自动去重）
+  results/data/eval_matrix.csv  用于出图和 summary.json 的长表
+  results/figures/*.png         图表
+  results/summary.json          结构化摘要（architecture → d_model → task → metric）
 """
 
 import argparse
@@ -33,35 +49,33 @@ from zoology.analysis.utils import fetch_wandb_runs
 # ---------------------------------------------------------------------------
 RESULTS_DIR = Path(__file__).parent / "results"
 DATA_DIR = RESULTS_DIR / "data"
+CACHE_DIR = DATA_DIR / "cache"
 FIG_DIR = RESULTS_DIR / "figures"
+REGISTRY_PATH = RESULTS_DIR / "sweep_registry.json"
 
 # wandb project 配置
-# ⚠️ 实验跑完后，在下面填入对应的 sweep_id（即 launch 时打印的 sweep_name）
-# 支持填入多个 sweep_id（列表），会合并拉取
+# 仅作为「首次引导」使用：注册表不存在时会用这里的 sweep_ids 初始化 registry，
+# 之后所有增删都走 --register / --refetch CLI，不需要手动改这个字典。
 TASKS = {
     "MQAR": {
         "project": "zoology_kda_mqar",
         "csv": "mqar_runs.csv",
         "sweep_ids": [
-            "mqar_configs_random_false0c2620"
-            # 例: "fixhd-a1b2c3"
+            "mqar_configs_random_false0c2620",
         ],
     },
     "Composition": {
         "project": "zoology_kda_mqar",
         "csv": "composition_runs.csv",
         "sweep_ids": [
-            "kda-composition-random-false-2d5758"
-            # 例: "fixhd-comp-d4
-            # e5f6"
+            "kda-composition-random-false-2d5758",
         ],
     },
     "Forgetting": {
         "project": "zoology_kda_mqar",
         "csv": "forgetting_runs.csv",
         "sweep_ids": [
-            "kda-forgetting-18cf0e"
-            # 例: "fixhd-forget-g7h8i9"
+            "kda-forgetting-18cf0e",
         ],
     },
 }
@@ -71,6 +85,62 @@ _PALETTE_POOL = [
     "#4E79A7", "#E15759", "#9C755F", "#F28E2B", "#59A14F",
     "#76B7B2", "#EDC948", "#B07AA1", "#FF9DA7", "#BAB0AC",
 ]
+
+# ---------------------------------------------------------------------------
+# Sweep registry: 单一真值源，记录每个 task 下所有已注册的 sweep_id
+# ---------------------------------------------------------------------------
+
+def load_registry() -> dict[str, list[str]]:
+    """加载 sweep_registry.json；不存在时用 TASKS 默认值引导并落盘。"""
+    if REGISTRY_PATH.exists():
+        with open(REGISTRY_PATH, "r", encoding="utf-8") as f:
+            reg = json.load(f)
+        # 保证所有 TASKS 里的 key 都存在（新增 task 不丢）
+        for task in TASKS:
+            reg.setdefault(task, [])
+        return reg
+    # 首次引导
+    reg = {task: list(info.get("sweep_ids", [])) for task, info in TASKS.items()}
+    save_registry(reg)
+    print(f"[registry] 首次引导 → {REGISTRY_PATH}")
+    return reg
+
+
+def save_registry(reg: dict[str, list[str]]):
+    REGISTRY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(REGISTRY_PATH, "w", encoding="utf-8") as f:
+        json.dump(reg, f, indent=2, ensure_ascii=False)
+
+
+def register_sweeps(reg: dict[str, list[str]], task: str, sweep_ids: list[str]):
+    """将若干 sweep_id 追加到指定 task，自动去重且保留插入顺序。"""
+    if task not in TASKS:
+        raise ValueError(
+            f"未知 task `{task}`，允许值：{list(TASKS.keys())}"
+        )
+    existing = set(reg.setdefault(task, []))
+    added = []
+    for sid in sweep_ids:
+        if sid not in existing:
+            reg[task].append(sid)
+            existing.add(sid)
+            added.append(sid)
+    if added:
+        print(f"[registry] {task}: 新增 {added}")
+    else:
+        print(f"[registry] {task}: 已存在，无新增")
+    save_registry(reg)
+
+
+def invalidate_cache(sweep_id: str):
+    """删除某个 sweep 的缓存 CSV，强制下次重新拉 wandb。"""
+    cache = CACHE_DIR / f"{sweep_id}.csv"
+    if cache.exists():
+        cache.unlink()
+        print(f"[cache]    已删除 {cache}")
+    else:
+        print(f"[cache]    {cache} 不存在，跳过")
+
 
 # ---------------------------------------------------------------------------
 # 工具函数
@@ -119,44 +189,72 @@ def melt_kv_accuracy(df: pd.DataFrame) -> pd.DataFrame:
 # 数据加载
 # ---------------------------------------------------------------------------
 
-def fetch_all(offline: bool = False, tasks: dict = None) -> dict[str, pd.DataFrame]:
-    """拉取或读取三组实验数据，返回 {task_name: DataFrame}。"""
+def _fetch_single_sweep(project: str, sweep_id: str, offline: bool) -> pd.DataFrame:
+    """拉取单个 sweep：优先走 per-sweep 缓存，缓存缺失且非 offline 时才访问 wandb。"""
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cache = CACHE_DIR / f"{sweep_id}.csv"
+    if cache.exists():
+        print(f"[cache]    命中 {sweep_id} ← {cache.name}")
+        return pd.read_csv(cache)
+    if offline:
+        print(f"[offline] 无缓存 {sweep_id}，跳过")
+        return pd.DataFrame()
+    print(f"[wandb]    拉取 {project} / {sweep_id} ...")
+    df = fetch_wandb_runs(project_name=project, sweep_id=sweep_id)
+    if "state" in df.columns:
+        df = df[df["state"] == "finished"]
+    df.to_csv(cache, index=False)
+    print(f"[cache]    已落盘 {cache.name}  ({len(df)} runs)")
+    return df
+
+
+def fetch_all(registry: dict[str, list[str]], offline: bool = False,
+              tasks: dict = None) -> dict[str, pd.DataFrame]:
+    """
+    按 registry 拉取/加载每个 sweep 的数据，拼成 per-task DataFrame。
+
+    流程：
+      对每个 task → 依次加载其所有 sweep_id 的缓存（缺失且非 offline 时从 wandb 拉）
+                  → concat + 以 run_id 去重
+                  → 写回 results/data/<task>_runs.csv（所有已注册 sweep 的合并视图）
+    """
     if tasks is None:
         tasks = TASKS
     result = {}
     for task_name, info in tasks.items():
-        csv_path = DATA_DIR / info["csv"]
-
-        if offline and csv_path.exists():
-            print(f"[offline] 读取 {csv_path}")
-            df = pd.read_csv(csv_path)
-        else:
-            sweep_ids = info.get("sweep_ids", [])
-            if not sweep_ids:
-                print(f"  ⚠ {task_name}: 未配置 sweep_ids，跳过 wandb 拉取")
-                if csv_path.exists():
-                    print(f"         尝试读取本地缓存 {csv_path}")
-                    df = pd.read_csv(csv_path)
-                else:
-                    continue
-            else:
-                print(f"[wandb]  拉取 project={info['project']}, sweep_ids={sweep_ids} ...")
-                df = fetch_wandb_runs(
-                    project_name=info["project"],
-                    sweep_id=sweep_ids,
-                )
-                # 只保留 finished 的 runs
-                if "state" in df.columns:
-                    df = df[df["state"] == "finished"]
-                csv_path.parent.mkdir(parents=True, exist_ok=True)
-                df.to_csv(csv_path, index=False)
-                print(f"         已保存 → {csv_path}  ({len(df)} runs)")
-
-        if df.empty:
-            print(f"  ⚠ {task_name}: 无数据，跳过")
+        sweep_ids = registry.get(task_name, [])
+        if not sweep_ids:
+            print(f"  ⚠ {task_name}: 注册表为空，跳过")
             continue
 
-        result[task_name] = df
+        per_sweep = []
+        for sid in sweep_ids:
+            sub = _fetch_single_sweep(info["project"], sid, offline)
+            if not sub.empty:
+                sub = sub.copy()
+                sub["_source_sweep"] = sid
+                per_sweep.append(sub)
+
+        if not per_sweep:
+            print(f"  ⚠ {task_name}: 所有 sweep 均无数据，跳过")
+            continue
+
+        merged = pd.concat(per_sweep, ignore_index=True)
+        # 按 run_id 去重；若同一 run_id 在多个 sweep 里出现，保留第一个（更早注册的）
+        if "run_id" in merged.columns:
+            before = len(merged)
+            merged = merged.drop_duplicates(subset=["run_id"], keep="first")
+            dropped = before - len(merged)
+            if dropped:
+                print(f"  - {task_name}: 去重丢弃 {dropped} 条")
+
+        # 写合并后的 per-task CSV（方便下游/离线用）
+        out_csv = DATA_DIR / info["csv"]
+        out_csv.parent.mkdir(parents=True, exist_ok=True)
+        merged.to_csv(out_csv, index=False)
+        print(f"  ✓ {task_name}: 合并 {len(merged)} runs → {out_csv.name}")
+
+        result[task_name] = merged
     return result
 
 
@@ -441,26 +539,58 @@ def save_summary(eval_df: pd.DataFrame, threshold: float = 0.99):
 # ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="fla_fixhead 实验结果分析")
-    parser.add_argument("--offline", action="store_true", help="仅使用本地 CSV，不访问 wandb")
+    parser = argparse.ArgumentParser(
+        description="Zoology 三组 MQAR 实验结果分析（支持增量注册 sweep）"
+    )
+    parser.add_argument("--offline", action="store_true",
+                        help="仅使用本地缓存，不访问 wandb")
     parser.add_argument("--tasks", nargs="+", default=list(TASKS.keys()),
-                        help="指定要分析的任务子集，如 --tasks MQAR Composition")
-    parser.add_argument("--sweep-id", nargs="+", default=None,
-                        help="覆盖所有任务的 sweep_ids（CLI 优先于文件内配置）")
+                        help=f"指定要分析的任务子集（默认全部）。可选：{list(TASKS.keys())}")
+    parser.add_argument(
+        "--register", nargs="+", action="append", metavar=("TASK", "SWEEP_ID"),
+        default=[],
+        help=("注册新 sweep 到指定 task，格式 `--register TASK SWEEP_ID [SWEEP_ID ...]`。"
+              "可多次传入以同时注册多个 task。"),
+    )
+    parser.add_argument("--refetch", nargs="+", default=[],
+                        help="强制重拉指定 sweep_id 的数据（删除本地缓存）")
+    parser.add_argument("--list", action="store_true",
+                        help="仅打印当前注册表，然后退出")
     args = parser.parse_args()
 
     FIG_DIR.mkdir(parents=True, exist_ok=True)
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-    # 仅加载指定任务
+    # 1) 加载 / 引导注册表
+    registry = load_registry()
+
+    # 2) 注册新 sweep（可多次）
+    for group in args.register:
+        if len(group) < 2:
+            parser.error("--register 至少需要 `TASK SWEEP_ID`")
+        task, *sids = group
+        register_sweeps(registry, task, sids)
+
+    # 3) 失效指定缓存
+    for sid in args.refetch:
+        invalidate_cache(sid)
+
+    # 4) --list: 打印并退出
+    if args.list:
+        print("\n[当前注册表]")
+        for task, sids in registry.items():
+            print(f"  {task} ({len(sids)} sweeps):")
+            for s in sids:
+                cached = (CACHE_DIR / f"{s}.csv").exists()
+                tag = "cached" if cached else "  not cached"
+                print(f"    - [{tag}] {s}")
+        return
+
+    # 5) 选定 task 子集
     tasks = {k: v for k, v in TASKS.items() if k in args.tasks}
 
-    # CLI --sweep-id 覆盖
-    if args.sweep_id:
-        for info in tasks.values():
-            info["sweep_ids"] = args.sweep_id
-
-    all_data = fetch_all(offline=args.offline, tasks=tasks)
+    all_data = fetch_all(registry, offline=args.offline, tasks=tasks)
     if not all_data:
         print("没有可用数据，退出。")
         return
@@ -469,7 +599,7 @@ def main():
     print("\n" + "=" * 50)
     for task, df in all_data.items():
         models = df["model.name"].unique() if "model.name" in df.columns else []
-        print(f"  {task}: {len(df)} runs, models={list(models)}")
+        print(f"  {task}: {len(df)} runs, models={sorted(set(models))}")
     print("=" * 50 + "\n")
 
     plot_difficulty_curves(all_data)
@@ -479,7 +609,7 @@ def main():
     if eval_df is not None:
         save_summary(eval_df)
 
-    print(f"\n完成！所有图表已保存至 {FIG_DIR}/，摘要已保存至 {RESULTS_DIR}/")
+    print(f"\n完成！图表 → {FIG_DIR}/，摘要 → {RESULTS_DIR}/summary.json")
 
 
 if __name__ == "__main__":
