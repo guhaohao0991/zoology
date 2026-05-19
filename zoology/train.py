@@ -1,8 +1,7 @@
 import argparse
 import random
 from datetime import datetime
-from pathlib import Path
-from typing import List, Union
+from typing import List, Tuple, Union
 import pandas as pd
 
 import torch
@@ -31,7 +30,8 @@ class Trainer:
         max_epochs: int = 100,
         learning_rate: float = 1e-3,
         weight_decay: float = 0.1,
-        grad_norm_clip: float = 0.5,
+        betas: Tuple[float, float] = (0.9, 0.98),
+        warmup_epochs: int = 1,
         early_stopping_metric: str = None,
         early_stopping_threshold: float = None,
         loss_type: str = "ce",
@@ -51,7 +51,8 @@ class Trainer:
         self.early_stopping_threshold = early_stopping_threshold
         self.learning_rate = learning_rate
         self.weight_decay = weight_decay
-        self.grad_norm_clip = grad_norm_clip
+        self.betas = betas
+        self.warmup_epochs = warmup_epochs
         self.slice_keys = slice_keys
         self.loss_type = loss_type
 
@@ -142,7 +143,6 @@ class Trainer:
                     loss = loss + sum(auxiliary_loss)
 
             loss.backward()
-            nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.grad_norm_clip)
             self.optimizer.step()
             iterator.set_postfix({"loss": loss.item()})
             self.logger.log({"train/loss": loss.item(), "epoch": epoch_idx})
@@ -189,11 +189,25 @@ class Trainer:
         self.optimizer = optim.AdamW(
             self.model.parameters(),
             lr=self.learning_rate,
+            betas=self.betas,
             weight_decay=self.weight_decay,
         )
-        self.scheduler = optim.lr_scheduler.CosineAnnealingLR(
-            self.optimizer, T_max=self.max_epochs, eta_min=0.0
-        )
+        if self.warmup_epochs > 0:
+            warmup_scheduler = optim.lr_scheduler.LinearLR(
+                self.optimizer, start_factor=1e-8, total_iters=self.warmup_epochs
+            )
+            cosine_scheduler = optim.lr_scheduler.CosineAnnealingLR(
+                self.optimizer, T_max=self.max_epochs - self.warmup_epochs, eta_min=0.0
+            )
+            self.scheduler = optim.lr_scheduler.SequentialLR(
+                self.optimizer,
+                schedulers=[warmup_scheduler, cosine_scheduler],
+                milestones=[self.warmup_epochs],
+            )
+        else:
+            self.scheduler = optim.lr_scheduler.CosineAnnealingLR(
+                self.optimizer, T_max=self.max_epochs, eta_min=0.0
+            )
         for epoch_idx in range(self.max_epochs):
             self.train_epoch(epoch_idx)
             metrics = self.test(epoch_idx)
@@ -209,24 +223,6 @@ class Trainer:
                 break
 
             self.scheduler.step()
-
-    def collect_predictions(self):
-        """Run inference on test set and return a DataFrame of predictions."""
-        self.model.eval()
-        results = []
-        with torch.no_grad():
-            for inputs, targets, slices in self.test_dataloader:
-                inputs, targets = inputs.to(self.device), targets.to(self.device)
-                _, preds = self.compute_loss(inputs, targets)
-                for pred, target, slc in zip(preds.cpu(), targets.cpu(), slices):
-                    mask = target != -100
-                    results.append({
-                        "preds": pred[mask].tolist(),
-                        "targets": target[mask].tolist(),
-                        "accuracy": (pred == target)[mask].to(float).mean().item(),
-                        **slc,
-                    })
-        return pd.DataFrame(results)
 
 
 def compute_metrics(
@@ -248,7 +244,7 @@ def compute_metrics(
 
 def train(config: TrainConfig):
     set_determinism(config.seed)
-
+    
     logger = WandbLogger(config)
     logger.log_config(config)
     config.print()
@@ -273,6 +269,8 @@ def train(config: TrainConfig):
         max_epochs=config.max_epochs,
         learning_rate=config.learning_rate,
         weight_decay=config.weight_decay,
+        betas=config.betas,
+        warmup_epochs=config.warmup_epochs,
         early_stopping_metric=config.early_stopping_metric,
         early_stopping_threshold=config.early_stopping_threshold,
         slice_keys=config.slice_keys,
@@ -281,15 +279,6 @@ def train(config: TrainConfig):
         logger=logger,
     )
     task.fit()
-
-    # Save predictions locally if configured
-    if config.collect_predictions and config.predictions_path:
-        predictions_df = task.collect_predictions()
-        path = Path(config.predictions_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        predictions_df.to_csv(str(path) + ".csv", index=False)
-        print(f"Predictions saved to {path}.csv ({len(predictions_df)} samples)")
-
     logger.finish()
 
 

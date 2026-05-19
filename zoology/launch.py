@@ -52,7 +52,7 @@ def main(python_file, outdir, name: str, parallelize: bool, gpus: str):
         os.environ["RAY_memory_monitor_refresh_ms"] = "0"
         # Propagate WANDB_API_KEY to Ray workers
         wandb_key = os.environ.get("WANDB_API_KEY", "")
-        ray.init(ignore_reinit_error=True, log_to_driver=False)
+        ray.init(num_cpus=8, ignore_reinit_error=True, log_to_driver=False)
         if wandb_key:
             os.environ["WANDB_API_KEY"] = wandb_key
 
@@ -69,7 +69,7 @@ def main(python_file, outdir, name: str, parallelize: bool, gpus: str):
         total = len(configs)
         print(f"Completed: {completed} ({completed / total:0.1%}) | Total: {total}")
 
-        remote = ray.remote(num_gpus=(1 // MAX_WORKERS_PER_GPU))(execute_config)
+        remote = ray.remote(num_gpus=(1 // MAX_WORKERS_PER_GPU), max_retries=0)(execute_config)
         futures = [remote.remote(config) for config in configs]
         
         while futures:

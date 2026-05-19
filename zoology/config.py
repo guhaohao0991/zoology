@@ -136,6 +136,8 @@ class TrainConfig(BaseConfig):
 
     learning_rate: float = 1e-3
     weight_decay: float = 0.1
+    betas: Tuple[float, float] = (0.9, 0.999)
+    warmup_epochs: int = 0
     seed: int = 123
 
     collect_predictions: bool = False
