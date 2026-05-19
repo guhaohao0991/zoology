@@ -1,6 +1,6 @@
 from zoology.config import ModelConfig, ModuleConfig
 
-DEFAULT_D_MODELS = [32, 64, 128]
+DEFAULT_D_MODELS = [256]
 
 
 # Attention
@@ -290,59 +290,33 @@ def add_gated_delta_net(models, conv_mixer, input_seq_len, model_factory_kwargs,
     return models
 
 
-# KDA (Kimi Delta Attention)
-def add_kda(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2, d_models=None):
-    block_type = "TransformerBlock"
-    for d_model in (d_models or DEFAULT_D_MODELS):
-        kda_mixer = dict(
-            name="zoology.mixers.kda.KimiDeltaAttention",
-            kwargs={
-                "num_heads": 2,
-                "use_short_conv": True,
-                "conv_size": 4,
-            }
-        )
-        mixers = [conv_mixer, kda_mixer] if conv_mixer is not None else [kda_mixer]
-        mixer = ModuleConfig(
-            name="zoology.mixers.hybrid.Hybrid",
-            kwargs={"configs": mixers}
-        )
-        model = ModelConfig(
-            block_type=block_type,
-            d_model=d_model,
-            n_layers=num_layers,
-            sequence_mixer=mixer,
-            max_position_embeddings=0,
-            name="kda",
-            **model_factory_kwargs
-        )
-        models.append(model)
-    return models
-
-
-# FG-GDN / KDA variants (fg_gdn, fg_gdn_plus, fg_gdn_efla)
-def add_fg_gdn(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2, d_models=None):
+# KDA (Kimi Delta Attention) + variants — all wired through
+# zoology.mixers.kda.KimiDeltaAttention via variant flags.
+def add_kda_variants(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2, d_models=None):
     block_type = "TransformerBlock"
     variants = [
-        ("fg_gdn",      {"use_fg_gdn": True,  "use_fg_gdn_plus": False, "use_efla": False}),
-        ("fg_gdn_plus", {"use_fg_gdn": False, "use_fg_gdn_plus": True,  "use_efla": False}),
-        ("fg_gdn_efla", {"use_fg_gdn": False, "use_fg_gdn_plus": False, "use_efla": True }),
+        ("kda",         {}),
+        ("fg_gdn",      {"use_fg_gdn": True}),
+        ("fg_gdn_plus", {"use_fg_gdn_plus": True}),
+        ("fg_gdn_efla", {"use_efla": True}),
+        ("ab_conv",     {"use_conv_alpha": True, "use_conv_beta": True}),
+        ("sep_beta",    {"use_sep_beta": True}),
     ]
     for d_model in (d_models or DEFAULT_D_MODELS):
         for variant_name, flags in variants:
-            fg_gdn_mixer = dict(
-                name="zoology.mixers.fg_gdn.FgGdnAttention",
+            kda_mixer = dict(
+                name="zoology.mixers.kda.KimiDeltaAttention",
                 kwargs={
                     "num_heads": 2,
                     "use_short_conv": True,
                     "conv_size": 4,
                     **flags,
-                }
+                },
             )
-            mixers = [conv_mixer, fg_gdn_mixer] if conv_mixer is not None else [fg_gdn_mixer]
+            mixers = [conv_mixer, kda_mixer] if conv_mixer is not None else [kda_mixer]
             mixer = ModuleConfig(
                 name="zoology.mixers.hybrid.Hybrid",
-                kwargs={"configs": mixers}
+                kwargs={"configs": mixers},
             )
             model = ModelConfig(
                 block_type=block_type,
@@ -351,7 +325,7 @@ def add_fg_gdn(models, conv_mixer, input_seq_len, model_factory_kwargs, num_laye
                 sequence_mixer=mixer,
                 max_position_embeddings=0,
                 name=variant_name,
-                **model_factory_kwargs
+                **model_factory_kwargs,
             )
             models.append(model)
     return models
@@ -386,6 +360,54 @@ def add_gla(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=
     return models
 
 
+# MLA / Gated MLA (Multi-Latent Attention, DeepSeek-V3 / Kimi)
+def add_mla(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2, d_models=None, num_heads=2):
+    """Registers two MLA variants: 'mla' (plain) and 'mla_gated' (sigmoid-gated output)."""
+    block_type = "TransformerBlock"
+    variants = [
+        ("mla",       {"gated": False}),
+        ("mla_gated", {"gated": True}),
+    ]
+    # Fixed latent compression rank (independent of d_model, like DeepSeek/Kimi config)
+    kv_lora_rank = 16  # small but meaningful compression for zoology's 32~128 d_model range
+
+    for d_model in (d_models or DEFAULT_D_MODELS):
+        head_dim = max(2, d_model // num_heads)
+        qk_rope = max(2, head_dim // 2)
+        qk_nope = head_dim - qk_rope
+        v_head_dim = head_dim
+
+        for name, flags in variants:
+            mla_mixer = dict(
+                name="zoology.mixers.mla.MLA",
+                kwargs={
+                    "num_heads": num_heads,
+                    "qk_nope_head_dim": qk_nope,
+                    "qk_rope_head_dim": qk_rope,
+                    "v_head_dim": v_head_dim,
+                    "kv_lora_rank": kv_lora_rank,
+                    "use_nope": False,
+                    **flags,
+                }
+            )
+            mixers = [conv_mixer, mla_mixer] if conv_mixer is not None else [mla_mixer]
+            mixer = ModuleConfig(
+                name="zoology.mixers.hybrid.Hybrid",
+                kwargs={"configs": mixers}
+            )
+            model = ModelConfig(
+                block_type=block_type,
+                d_model=d_model,
+                n_layers=num_layers,
+                sequence_mixer=mixer,
+                max_position_embeddings=0,
+                name=name,
+                **model_factory_kwargs
+            )
+            models.append(model)
+    return models
+
+
 # Deepseek NSA
 def add_deepseek_nsa(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2, d_models=None):
     block_type = "TransformerBlock"
@@ -412,6 +434,71 @@ def add_deepseek_nsa(models, conv_mixer, input_seq_len, model_factory_kwargs, nu
             sequence_mixer=mixer,
             max_position_embeddings=0,
             name="deepseek_nsa",
+            **model_factory_kwargs
+        )
+        models.append(model)
+    return models
+
+
+# MomentumDeltaNet
+def add_momentum_delta_net(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2, d_models=None):
+    block_type = "TransformerBlock"
+    for d_model in (d_models or DEFAULT_D_MODELS):
+        mdn_mixer = dict(
+            name="zoology.mixers.momentum_delta_net.MomentumDeltaNet",
+            kwargs={
+                "num_heads": 2,
+                "use_gate": True,
+                "use_short_conv": True,
+                "use_output_correction": True,
+                "conv_size": 4,
+            }
+        )
+        mixers = [conv_mixer, mdn_mixer] if conv_mixer is not None else [mdn_mixer]
+        mixer = ModuleConfig(
+            name="zoology.mixers.hybrid.Hybrid",
+            kwargs={"configs": mixers}
+        )
+        model = ModelConfig(
+            block_type=block_type,
+            d_model=d_model,
+            n_layers=num_layers,
+            sequence_mixer=mixer,
+            max_position_embeddings=0,
+            name="momentum_delta_net",
+            **model_factory_kwargs
+        )
+        models.append(model)
+    return models
+
+
+# AdafactorDeltaNet
+def add_adafactor_delta_net(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2, d_models=None):
+    block_type = "TransformerBlock"
+    for d_model in (d_models or DEFAULT_D_MODELS):
+        adn_mixer = dict(
+            name="zoology.mixers.adafactor_delta_net.AdafactorDeltaNet",
+            kwargs={
+                "num_heads": 2,
+                "expand_v": 2.0,
+                "use_gate": True,
+                "use_short_conv": True,
+                "use_output_correction": True,
+                "conv_size": 4,
+            }
+        )
+        mixers = [conv_mixer, adn_mixer] if conv_mixer is not None else [adn_mixer]
+        mixer = ModuleConfig(
+            name="zoology.mixers.hybrid.Hybrid",
+            kwargs={"configs": mixers}
+        )
+        model = ModelConfig(
+            block_type=block_type,
+            d_model=d_model,
+            n_layers=num_layers,
+            sequence_mixer=mixer,
+            max_position_embeddings=0,
+            name="adafactor_delta_net",
             **model_factory_kwargs
         )
         models.append(model)

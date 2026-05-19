@@ -12,7 +12,7 @@ from einops import rearrange
 from torch.nn import functional as F
 
 try:
-    from fla.modules import FusedRMSNormSwishGate, RMSNorm, ShortConvolution
+    from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
     from fla.ops.gated_delta_rule import (chunk_gated_delta_rule,
                                         fused_recurrent_gated_delta_rule)
 except:
@@ -23,11 +23,11 @@ if TYPE_CHECKING:
 
     from fla.models.utils import Cache
 
-
+@torch.compile
 def elu_p1(x):
     return (F.elu(x, 1., False) + 1.).to(x)
 
-
+@torch.compile
 def sum_norm(x):
     return (x / x.sum(-1, keepdim=True)).to(x)
 
@@ -90,6 +90,7 @@ class GatedDeltaNet(nn.Module):
         mode: str = 'chunk',
         use_gate: bool = True,
         use_short_conv: bool = True,
+        allow_neg_eigval: bool = False,
         conv_size: int = 4,
         conv_bias: bool = False,
         layer_idx: int = None,
@@ -99,7 +100,7 @@ class GatedDeltaNet(nn.Module):
         super().__init__()
 
         self.mode = mode
-
+        self.allow_neg_eigval = allow_neg_eigval
         hidden_size = int(d_model)
         self.hidden_size = hidden_size
         self.expand_v = expand_v
@@ -132,8 +133,7 @@ class GatedDeltaNet(nn.Module):
         A_log = torch.log(A)
         self.A_log = nn.Parameter(A_log)
         self.A_log._no_weight_decay = True
-        self.D = nn.Parameter(torch.ones(self.num_heads))
-        self.D._no_weight_decay = True
+        
         # hard coded for now
         dt_min = 0.001
         dt_max = 0.1
@@ -174,7 +174,7 @@ class GatedDeltaNet(nn.Module):
             )
         if use_gate:
             self.g_proj = nn.Linear(hidden_size, self.value_dim, bias=False)
-            self.o_norm = FusedRMSNormSwishGate(self.head_v_dim, eps=norm_eps)
+            self.o_norm = FusedRMSNormGated(self.head_v_dim, eps=norm_eps)
         else:
             self.o_norm = RMSNorm(self.head_v_dim, eps=norm_eps)
         self.o_proj = nn.Linear(self.value_dim, hidden_size, bias=False)
@@ -234,6 +234,9 @@ class GatedDeltaNet(nn.Module):
         q, k = map(lambda x: rearrange(x, 'b t (h d) -> b t h d', d=self.head_k_dim), (q, k))
         v = rearrange(v, 'b t (h d) -> b t h d', d=self.head_v_dim)
         beta = self.b_proj(hidden_states).sigmoid()
+        if self.allow_neg_eigval:
+            beta = beta * 2.
+
         g = -self.A_log.float().exp() * F.softplus(self.a_proj(hidden_states).float() + self.dt_bias)
 
         # dealing with padding
